@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Max Reasoning Default",
+    "description": "Switches every model to its highest advertised reasoning effort and lifts effort-free requests to that level."
+  }
+}

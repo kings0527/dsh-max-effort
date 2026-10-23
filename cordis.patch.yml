@@ -1,0 +1,6 @@
+- insert:
+    - id: max-effort
+      name: '@local/dsh-max-effort'
+      config:
+        catalogDefault: true
+        requestFallback: true
