@@ -85,6 +85,10 @@ export function apply(ctx, config = {}) {
   }
   const llm = ctx.llm
 
+  // The client fetches its model catalog once per connection and refreshes it
+  // only on a registry/settings/credential notification. A page that connected
+  // while the composition was still starting holds the pre-patch defaults until
+  // one of those fires, so announce the new catalog after patching.
   if (options.catalogDefault) {
     // `ctx.llm` is a read-through traceable proxy; write to the raw service.
     const target = llm[CORDIS_ORIGINAL] ?? llm
@@ -101,6 +105,21 @@ export function apply(ctx, config = {}) {
     }
     ctx.effect(() => () => {
       if (target.resolveModelInfo === patched) target.resolveModelInfo = original
+    })
+
+    const announce = () => {
+      try {
+        ctx.emit('llm/adapters-updated')
+      } catch (error) {
+        ctx.logger?.warn?.(`max-effort: could not announce the refreshed model catalog: ${String(error)}`)
+      }
+    }
+    announce()
+    // A client that connects during this apply misses the immediate announce.
+    const timers = [setTimeout(announce, 1500), setTimeout(announce, 5000)]
+    for (const timer of timers) timer.unref?.()
+    ctx.effect(() => () => {
+      for (const timer of timers) clearTimeout(timer)
     })
   }
 
