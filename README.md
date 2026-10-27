@@ -65,7 +65,7 @@ pre-patch defaults; announcing the update is what closes that window.
 
 | Seam | Effect |
 |---|---|
-| `llm.resolveModelInfo()` | Advertises the highest advertised effort as the model's `reasoning.defaultEffort`, so the model catalog makes every switch carry it and the caption shows it. |
+| `llm.resolveModelInfoFor()` | The one resolution point behind both the public model catalog and `resolveCallConfig`, which `session.selectModel` uses to normalize and store a selection. Raising `reasoning.defaultEffort` there makes every model switch store the highest effort **even when the client sends none** — the caption reads the stored selection, so a stale client-side catalog cannot reintroduce “Default”. |
 | `llm/adapters-updated` | Tells connected clients to refetch the catalog after the patch, including a delayed repeat for a client that connects while the composition starts. |
 | `agent/request` waterfall | A frozen call configuration without an explicit `reasoningEffort` is given the highest advertised effort before `llm.prepareCall()` validates it. Explicit efforts are preserved. |
 

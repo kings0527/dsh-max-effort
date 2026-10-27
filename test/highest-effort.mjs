@@ -19,12 +19,29 @@ assert.equal(highestEffort({ efforts: [{ id: 'low' }] }), 'low')
 assert.equal(highestEffort({ efforts: [{ id: 'off' }, { id: 'low' }, { id: 'max' }, { id: 'max-plus' }] }), 'max')
 
 // --- apply ---------------------------------------------------------------
+// The fake mirrors the real LlmRuntime seams this plugin wraps:
+// `resolveModelInfoFor` is the shared resolution point behind both the public
+// `resolveModelInfo` and `resolveCallConfig`'s default materialization.
 function fakeCtx(modelInfo) {
   const listeners = new Map()
   const disposers = []
   const raw = {
-    async resolveModelInfo(provider, model) {
+    async resolveModelInfoFor(provider, model) {
       return modelInfo(provider, model)
+    },
+    async resolveModelInfo(provider, model) {
+      return this.resolveModelInfoFor(provider, model)
+    },
+    async resolveCallConfig(config) {
+      const info = await this.resolveModelInfoFor(config.provider, config.model)
+      const reasoning = info.reasoning
+      if (reasoning === undefined) return { ...config }
+      const effective = config.reasoningEffort ?? reasoning.defaultEffort
+      if (effective === undefined) return { ...config }
+      if (!reasoning.efforts.some((effort) => effort.id === effective)) {
+        throw new Error(`unsupported reasoning effort ${effective}`)
+      }
+      return { ...config, reasoningEffort: effective }
     },
   }
   // Mimic Cordis: `ctx.llm` is a traceable proxy that exposes the raw service
@@ -38,6 +55,7 @@ function fakeCtx(modelInfo) {
   const ctx = {
     llm: view,
     logger: { warn() {} },
+    emit() {},
     effect(callback) {
       const dispose = callback()
       if (typeof dispose === 'function') disposers.push(dispose)
@@ -57,24 +75,36 @@ const deepseek = (provider, model) => ({
   reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }], defaultEffort: 'high' },
 })
 
-// Catalog seam: defaultEffort is raised without touching the adapter's fixpoint.
+// The selectModel seam: an effort-free selection is stored with the highest effort.
 {
   const { ctx, disposers } = fakeCtx(deepseek)
+  apply(ctx, {})
+  const stored = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(stored.reasoningEffort, 'max', 'selectModel stores max even when the client sends no effort')
+  const explicit = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'low' })
+  assert.equal(explicit.reasoningEffort, 'low', 'an explicit lower effort is preserved')
+  for (const dispose of disposers) dispose()
+  const restored = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(restored.reasoningEffort, 'high', 'uninstall restores the adapter default')
+}
+
+// The catalog seam: resolveModelInfo advertises the highest default.
+{
+  const { ctx } = fakeCtx(deepseek)
   apply(ctx, {})
   const info = await ctx.llm.resolveModelInfo('deepseek-account', 'deepseek-flash')
   assert.equal(info.reasoning.defaultEffort, 'max')
   assert.equal(info.reasoning.efforts.at(-1).id, 'max')
-  for (const dispose of disposers) dispose()
-  const restored = await ctx.llm.resolveModelInfo('deepseek-account', 'deepseek-flash')
-  assert.equal(restored.reasoning.defaultEffort, 'high', 'uninstall restores the adapter default')
 }
 
-// Catalog seam can be disabled.
+// Catalog seam can be disabled; the adapter default flows through untouched.
 {
   const { ctx } = fakeCtx(deepseek)
   apply(ctx, { catalogDefault: false })
   const info = await ctx.llm.resolveModelInfo('deepseek-account', 'deepseek-flash')
   assert.equal(info.reasoning.defaultEffort, 'high')
+  const stored = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(stored.reasoningEffort, 'high')
 }
 
 // A service that refuses the override fails loudly instead of no-oping.

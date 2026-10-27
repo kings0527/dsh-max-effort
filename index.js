@@ -4,16 +4,23 @@
 // effort the model advertises, so the user never has to open the effort menu
 // for a second click.
 //
-// Two seams:
+// Three seams:
 //
-// 1. `llm.resolveModelInfo()` feeds `sessionController.modelCatalog()` (the
-//    catalog behind the composer model seat and the `/model` popup). Both
-//    entries build a selection from the clicked model's `reasoning.defaultEffort`
-//    and omit the effort when it is undefined — which is what renders as
-//    "Default". Advertising the highest effort there makes every model switch
-//    carry it, and stores it in the Session selection.
+// 1. `llm.resolveModelInfoFor()` is the one internal resolution point behind
+//    both the public `llm.resolveModelInfo()` (which feeds
+//    `sessionController.modelCatalog()`, the catalog behind the composer model
+//    seat and the `/model` popup) and `llm.resolveCallConfig()` (which
+//    `session.selectModel` uses to normalize and store a Session's selection).
+//    Raising `reasoning.defaultEffort` there makes every model switch carry
+//    the highest effort even when the client sends none — the client's caption
+//    then reads the stored selection, not its cached catalog.
 //
-// 2. `agent/request` returns the frozen call configuration before
+// 2. `llm/adapters-updated` is announced after the patch so connected clients
+//    refetch their cached model catalog; the client caches it per connection
+//    and a page that connected while the composition was still starting would
+//    otherwise keep the pre-patch defaults.
+//
+// 3. `agent/request` returns the frozen call configuration before
 //    `llm.prepareCall()` validates it. A request that names no effort (older
 //    stored selections, subagents, titles) is lifted to the same highest
 //    advertised level. An explicit effort is preserved.
@@ -28,8 +35,8 @@ export const inject = ['llm']
 
 /**
  * `ctx.llm` is a traceable proxy: reads wrap every method in another proxy, so
- * identity checks must go through the raw service object Cordis exposes under
- * `Symbol.for('cordis.original')`.
+ * writes and identity checks must go through the raw service object Cordis
+ * exposes under `Symbol.for('cordis.original')`.
  */
 const CORDIS_ORIGINAL = Symbol.for('cordis.original')
 
@@ -75,7 +82,7 @@ function withHighestDefault(info) {
  *
  * @param ctx - owning Host context.
  * @param config - optional switches from `cordis.patch.yml`.
- * @param config.catalogDefault - advertise the highest effort as the catalog default (default true).
+ * @param config.catalogDefault - advertise the highest effort as the model default (default true).
  * @param config.requestFallback - lift effort-free requests to the highest effort (default true).
  */
 export function apply(ctx, config = {}) {
@@ -85,28 +92,28 @@ export function apply(ctx, config = {}) {
   }
   const llm = ctx.llm
 
-  // The client fetches its model catalog once per connection and refreshes it
-  // only on a registry/settings/credential notification. A page that connected
-  // while the composition was still starting holds the pre-patch defaults until
-  // one of those fires, so announce the new catalog after patching.
   if (options.catalogDefault) {
     // `ctx.llm` is a read-through traceable proxy; write to the raw service.
     const target = llm[CORDIS_ORIGINAL] ?? llm
-    const original = target.resolveModelInfo
+    const original = target.resolveModelInfoFor
     if (typeof original !== 'function') {
-      throw new Error('max-effort: llm.resolveModelInfo is unavailable, so model-switch defaults cannot be raised')
+      throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
     }
-    const patched = async function resolveModelInfoWithHighestDefault(...args) {
+    const patched = async function resolveModelInfoForWithHighestDefault(...args) {
       return withHighestDefault(await original.apply(this, args))
     }
-    target.resolveModelInfo = patched
-    if (target.resolveModelInfo !== patched) {
-      throw new Error('max-effort: llm.resolveModelInfo did not accept the catalog override')
+    target.resolveModelInfoFor = patched
+    if (target.resolveModelInfoFor !== patched) {
+      throw new Error('max-effort: llm.resolveModelInfoFor did not accept the catalog override')
     }
     ctx.effect(() => () => {
-      if (target.resolveModelInfo === patched) target.resolveModelInfo = original
+      if (target.resolveModelInfoFor === patched) target.resolveModelInfoFor = original
     })
 
+    // The client fetches its model catalog once per connection and refreshes it
+    // only on a registry/settings/credential notification. A page that connected
+    // while the composition was still starting holds the pre-patch defaults
+    // until one of those fires, so announce the new catalog after patching.
     const announce = () => {
       try {
         ctx.emit('llm/adapters-updated')
