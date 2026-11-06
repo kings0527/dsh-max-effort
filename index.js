@@ -4,7 +4,7 @@
 // effort the model advertises, so the user never has to open the effort menu
 // for a second click.
 //
-// Three seams:
+// Two seams:
 //
 // 1. `llm.resolveModelInfoFor()` is the one internal resolution point behind
 //    both the public `llm.resolveModelInfo()` (which feeds
@@ -20,15 +20,12 @@
 //    and a page that connected while the composition was still starting would
 //    otherwise keep the pre-patch defaults.
 //
-// 3. `agent/request` returns the frozen call configuration before
-//    `llm.prepareCall()` validates it. A request that names no effort (older
-//    stored selections, subagents, titles) is lifted to the same highest
-//    advertised level. An explicit effort is preserved.
-//
-// The request seam degrades safely: an adapter with no reasoning metadata, or
-// one whose only level is `off`, keeps its current default and the request is
-// left untouched. The catalog seam fails loudly when the Host API it wraps is
-// gone, because a silent no-op would look like "Default" all over again.
+// Reasoning effort is selected before the step is prepared, by
+// `agent.model.select()` through the normal model-selection path. DSH 0.2.2
+// freezes that selection before dispatching `agent/request`; mutating the
+// request there is rejected at runtime, so this plugin never listens to it.
+// The catalog seam remains safe for effort-free switches, and explicit
+// lower-effort choices are preserved.
 
 export const name = 'max-effort'
 export const inject = ['llm']
@@ -83,12 +80,10 @@ function withHighestDefault(info) {
  * @param ctx - owning Host context.
  * @param config - optional switches from `cordis.patch.yml`.
  * @param config.catalogDefault - advertise the highest effort as the model default (default true).
- * @param config.requestFallback - lift effort-free requests to the highest effort (default true).
  */
 export function apply(ctx, config = {}) {
   const options = {
     catalogDefault: config?.catalogDefault !== false,
-    requestFallback: config?.requestFallback !== false,
   }
   const llm = ctx.llm
 
@@ -127,24 +122,6 @@ export function apply(ctx, config = {}) {
     for (const timer of timers) timer.unref?.()
     ctx.effect(() => () => {
       for (const timer of timers) clearTimeout(timer)
-    })
-  }
-
-  if (options.requestFallback) {
-    ctx.on('agent/request', async (_payload, next) => {
-      const frozen = await next()
-      if (frozen === null || typeof frozen !== 'object') return frozen
-      if (frozen.reasoningEffort !== undefined) return frozen
-      try {
-        const info = await llm.resolveModelInfo(frozen.provider, frozen.model)
-        const highest = highestEffort(info?.reasoning)
-        if (highest === undefined) return frozen
-        return { ...frozen, reasoningEffort: highest }
-      } catch {
-        // Resolution failures surface through prepareCall with their own error;
-        // never mask them by rewriting the config here.
-        return frozen
-      }
     })
   }
 }

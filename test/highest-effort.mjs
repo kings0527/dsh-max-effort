@@ -114,37 +114,19 @@ const deepseek = (provider, model) => ({
   assert.throws(() => apply(ctx, {}), TypeError)
 }
 
-// Request seam: only effort-free configurations are lifted.
+// Request safety: DSH freezes the selection before `agent/request`, so the
+// plugin must never register a late effort override — even if an old profile
+// still carries `requestFallback: true`.
 {
   const { ctx, listeners } = fakeCtx(deepseek)
-  apply(ctx, {})
-  const handler = listeners.get('agent/request')
-  assert.equal(typeof handler, 'function')
-
-  const frozen = { provider: 'deepseek-account', model: 'deepseek-flash' }
-  assert.equal((await handler({}, async () => frozen)).reasoningEffort, 'max')
-
-  const explicit = { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'low' }
-  assert.equal(await handler({}, async () => explicit), explicit, 'explicit effort is preserved')
-
-  // requestFallback can be disabled.
-  const { ctx: ctx2, listeners: listeners2 } = fakeCtx(deepseek)
-  apply(ctx2, { requestFallback: false })
-  assert.equal(listeners2.get('agent/request'), undefined)
-
-  // A model without reasoning metadata is left alone.
-  const { ctx: ctx4, listeners: listeners4 } = fakeCtx(() => ({ provider: 'acme', id: 'plain', name: 'plain' }))
-  apply(ctx4, {})
-  const plain = { provider: 'acme', model: 'plain' }
-  assert.equal(await listeners4.get('agent/request')({}, async () => plain), plain)
-
-  // A resolution failure keeps the configuration untouched.
-  const { ctx: ctx3, listeners: listeners3 } = fakeCtx(() => {
-    throw new Error('unavailable')
-  })
-  apply(ctx3, {})
-  const untouched = { provider: 'acme', model: 'plain' }
-  assert.equal(await listeners3.get('agent/request')({}, async () => untouched), untouched)
+  apply(ctx, { requestFallback: true })
+  assert.equal(
+    listeners.get('agent/request'),
+    undefined,
+    'the plugin never mutates a frozen request configuration',
+  )
+  const stored = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(stored.reasoningEffort, 'max', 'model selection still lands on max')
 }
 
 console.log('highest-effort: all assertions passed')

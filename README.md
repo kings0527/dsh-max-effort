@@ -2,7 +2,12 @@
 
 A DeepSeek Harness (DSH) Host bundle: **every model switch lands on the
 highest reasoning effort that model advertises**, so picking Max never costs a
-second click. Requests that name no effort are lifted to the same level.
+second click.
+
+DSH 0.2.2 freezes a step's model selection before `agent/request`. This plugin
+therefore sets the default at model-selection time and **never rewrites a
+frozen request**; a late override is rejected by the runtime with
+`use agent.model.select() before step preparation`.
 
 ## 中文速览
 
@@ -67,7 +72,6 @@ pre-patch defaults; announcing the update is what closes that window.
 |---|---|
 | `llm.resolveModelInfoFor()` | The one resolution point behind both the public model catalog and `resolveCallConfig`, which `session.selectModel` uses to normalize and store a selection. Raising `reasoning.defaultEffort` there makes every model switch store the highest effort **even when the client sends none** — the caption reads the stored selection, so a stale client-side catalog cannot reintroduce “Default”. |
 | `llm/adapters-updated` | Tells connected clients to refetch the catalog after the patch, including a delayed repeat for a client that connects while the composition starts. |
-| `agent/request` waterfall | A frozen call configuration without an explicit `reasoningEffort` is given the highest advertised effort before `llm.prepareCall()` validates it. Explicit efforts are preserved. |
 
 Models with no reasoning metadata, or whose only level is `off`, are left
 unchanged. For a model whose top level is `high` rather than `max`, the highest
@@ -82,9 +86,14 @@ explicit target keeps the guard meaningful. If a future DSH release removes
 `llm.resolveModelInfo`, the plugin row fails at activation instead of silently
 reverting to “Default”.
 
+## Selection timing
+
+Both the model switch and the stored default now reach `agent.model.select()`
+before step preparation, which is the only point DSH accepts a new effort.
+
 ## Configuration
 
-Both switches default to `true`; override them in the profile patch when
+The catalog switch defaults to `true`; override it in the profile patch when
 needed.
 
 ```yaml
@@ -92,12 +101,10 @@ needed.
   name: '@local/dsh-max-effort'
   config:
     catalogDefault: true
-    requestFallback: true
 ```
 
-`catalogDefault: false` keeps the shipped catalog defaults; `requestFallback:
-false` stops lifting effort-free requests. Set both to `false` to park the
-plugin without uninstalling it.
+`catalogDefault: false` keeps the shipped catalog defaults and parks the plugin
+without uninstalling it. The obsolete `requestFallback` key is ignored.
 
 ## Test
 
