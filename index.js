@@ -5,25 +5,24 @@
 // no effort must actually be sent at that level instead of only showing the
 // label.
 //
-// Three seams:
+// Three seams, in the order this plugin tries them:
 //
-// 1. `llm.resolveModelInfoFor()` is the one internal resolution point behind
-//    both the public `llm.resolveModelInfo()` (which feeds
-//    `sessionController.modelCatalog()`, the catalog behind the composer model
-//    seat and the `/model` popup) and `llm.resolveCallConfig()` (which
-//    `session.selectModel` validates a selection through).
-//    Raising `reasoning.defaultEffort` there makes the catalog offer the
-//    highest effort as the model default, so a model switch stores it and the
-//    caption reads it instead of “Default”.
+// 1. `llm.normalizeModelInfo()` — the default path on DSH 0.2.2. It is the one
+//    normalization chokepoint behind `llm.resolveModelInfo()` (the catalog that
+//    feeds the composer model seat and the `/model` popup), `llm.resolveCallConfig()`
+//    (which `session.selectModel` validates through) and `llm.prepareCall()`
+//    (which logs the request header and dispatches the provider call). Raising
+//    `reasoning.defaultEffort` there makes the catalog offer the highest level,
+//    and lets `prepareCall` materialize it as an *adapter default* — recorded as
+//    `adapterDefaults.reasoningEffort` — so a defaulted level is never mistaken
+//    for a user-pinned one.
 //
-// 2. `llm.prepareCall()` is where the Harness logs the request header and
-//    dispatches the provider call. Its third argument, `ConfigureCall`, is a
-//    pure synchronous hook that picks the concrete controls from captured
-//    model metadata *before* defaults and validation are applied. Passing one
-//    that raises an effort-free call to the highest advertised level makes the
-//    effort real for Sessions that carry no stored selection (Sessions resumed
-//    from before this plugin, subagents, titles) — and the logged header
-//    records it, so the next step re-derives the same value.
+// 2. Fallbacks for a release where that chokepoint is missing, or for a profile
+//    that disables one of the two switches: `llm.resolveModelInfoFor()` for the
+//    catalog, and `llm.prepareCall()`'s `ConfigureCall` for calls that name no
+//    effort. The configure hook runs after step preparation froze the selection
+//    and before defaults/validation, so an injected effort is logged and sent
+//    too (a pinned effort is preserved; a named lower level wins).
 //
 // 3. `llm/adapters-updated` is announced after the patch so connected clients
 //    refetch their cached model catalog; the client caches it per connection
@@ -35,7 +34,7 @@
 // throws "agent/request proposed reasoning effort …"), which fails the whole
 // turn. `prepareCall`'s configure hook runs after that check, inside the call
 // the loop already froze, so it is the supported seam.
-//
+
 // The call seam degrades safely: an adapter with no reasoning metadata, or one
 // whose only level is `off`, keeps its current default and the request is left
 // untouched. The resolution and call seams fail loudly when the Host API they
