@@ -128,47 +128,47 @@ export function apply(ctx, config = {}) {
     })
   }
 
-  // Fast & faithful path for DSH 0.2.2 when both seams are enabled (default):
-  // `llm.normalizeModelInfo` is the single shared normalization chokepoint
-  // called by both `resolveModelInfoFor` (catalog + `resolveCallConfig`) and
-  // `prepareCall`. Raising `defaultEffort` there keeps `proposed.reasoningEffort`
-  // undefined on effort-free calls, so `prepareCall` records
-  // `adapterDefaults: { reasoningEffort: true }` (preserving default-vs-pinned
-  // provenance in `dsh-agent`'s `selectionOfHeader`) and hands callers'
-  // `configure(controls, model)` callbacks consistent `model.reasoning.defaultEffort`.
-  if (options.catalogDefault && options.callDefault && typeof target.normalizeModelInfo === 'function') {
-    const originalNormalize = target.normalizeModelInfo
-    const patchedNormalize = function normalizeModelInfoWithHighestDefault(...args) {
-      return withHighestDefault(originalNormalize.apply(this, args))
-    }
-    target.normalizeModelInfo = patchedNormalize
-    if (target.normalizeModelInfo !== patchedNormalize) {
-      throw new Error('max-effort: llm.normalizeModelInfo did not accept the default-effort override')
-    }
-    ctx.effect(() => () => {
-      if (target.normalizeModelInfo === patchedNormalize) target.normalizeModelInfo = originalNormalize
-    })
-    announceCatalog()
-    return
-  }
-
   if (options.catalogDefault) {
-    // `ctx.llm` is a read-through traceable proxy; write to the raw service.
-    const original = target.resolveModelInfoFor
-    if (typeof original !== 'function') {
-      throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
+    // Fast & faithful path for DSH 0.2.2: `llm.normalizeModelInfo` is the single
+    // shared normalization chokepoint behind `resolveModelInfoFor` (catalog and
+    // `resolveCallConfig`) and `prepareCall`. Raising `defaultEffort` there lets
+    // `prepareCall` materialize the highest level as an adapter default, so the
+    // header records `adapterDefaults.reasoningEffort` and a defaulted level is
+    // never mistaken for a user pin.
+    if (typeof target.normalizeModelInfo === 'function') {
+      const originalNormalize = target.normalizeModelInfo
+      const patchedNormalize = function normalizeModelInfoWithHighestDefault(...args) {
+        return withHighestDefault(originalNormalize.apply(this, args))
+      }
+      target.normalizeModelInfo = patchedNormalize
+      if (target.normalizeModelInfo !== patchedNormalize) {
+        throw new Error('max-effort: llm.normalizeModelInfo did not accept the default-effort override')
+      }
+      ctx.effect(() => () => {
+        if (target.normalizeModelInfo === patchedNormalize) target.normalizeModelInfo = originalNormalize
+      })
+      announceCatalog()
+      // Fall through: the call seam below stays installed as a guard in case a
+      // later release keeps `normalizeModelInfo` but stops routing
+      // `prepareCall` through it. It never fires while the default is raised.
+    } else {
+      // `ctx.llm` is a read-through traceable proxy; write to the raw service.
+      const original = target.resolveModelInfoFor
+      if (typeof original !== 'function') {
+        throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
+      }
+      const patched = async function resolveModelInfoForWithHighestDefault(...args) {
+        return withHighestDefault(await original.apply(this, args))
+      }
+      target.resolveModelInfoFor = patched
+      if (target.resolveModelInfoFor !== patched) {
+        throw new Error('max-effort: llm.resolveModelInfoFor did not accept the catalog override')
+      }
+      ctx.effect(() => () => {
+        if (target.resolveModelInfoFor === patched) target.resolveModelInfoFor = original
+      })
+      announceCatalog()
     }
-    const patched = async function resolveModelInfoForWithHighestDefault(...args) {
-      return withHighestDefault(await original.apply(this, args))
-    }
-    target.resolveModelInfoFor = patched
-    if (target.resolveModelInfoFor !== patched) {
-      throw new Error('max-effort: llm.resolveModelInfoFor did not accept the catalog override')
-    }
-    ctx.effect(() => () => {
-      if (target.resolveModelInfoFor === patched) target.resolveModelInfoFor = original
-    })
-    announceCatalog()
   }
 
   if (options.callDefault) {
@@ -177,7 +177,9 @@ export function apply(ctx, config = {}) {
     // step itself fixed: it is logged in the request header and sent to the
     // provider. A caller that already named an effort (a stored selection, a
     // pinned level) keeps it; an effort-free caller gets the highest level the
-    // captured model advertises.
+    // captured model advertises — unless the catalog seam already raised the
+    // model's own default, in which case the Harness materializes it and the
+    // header keeps the adapter-default provenance.
     const originalPrepareCall = target.prepareCall
     if (typeof originalPrepareCall !== 'function') {
       throw new Error('max-effort: llm.prepareCall is unavailable, so effort-free calls cannot be raised')
@@ -189,6 +191,9 @@ export function apply(ctx, config = {}) {
         if (chosen.reasoningEffort !== undefined) return chosen
         const highest = highestEffort(model?.reasoning)
         if (highest === undefined) return chosen
+        // The catalog seam already made this the adapter default: leaving the
+        // control unnamed keeps `adapterDefaults.reasoningEffort` provenance.
+        if (model?.reasoning?.defaultEffort === highest) return chosen
         return { ...chosen, reasoningEffort: highest }
       }
       return originalPrepareCall.call(this, callConfig, signal, raiseEffort)

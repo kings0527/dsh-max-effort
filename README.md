@@ -72,7 +72,7 @@ pre-patch defaults; announcing the update is what closes that window.
 |---|---|
 | `llm.normalizeModelInfo()` (default path) | The one normalization chokepoint behind the public model catalog, `resolveCallConfig` and `prepareCall`. Raising `reasoning.defaultEffort` there makes the catalog — and every model switch built from it — carry the highest effort, and lets `prepareCall` materialize it as an **adapter default** (`adapterDefaults.reasoningEffort`), so a defaulted level is never mistaken for a user-pinned one. |
 | `llm.resolveModelInfoFor()` (fallback) | Used when that chokepoint is unavailable, or with `callDefault: false`: the resolution point behind the catalog and `resolveCallConfig`, raised the same way. |
-| `llm.prepareCall()` (fallback) | Used when the chokepoint is unavailable, or with `catalogDefault: false`: passes a `ConfigureCall` that gives a call without an explicit `reasoningEffort` the highest advertised effort. It runs after step preparation froze the selection and before defaults/validation, so the logged header and the provider request both carry the level. Explicit efforts are preserved. |
+| `llm.prepareCall()` (guard) | Always installed with `callDefault`. It passes a `ConfigureCall` that raises a call without an explicit `reasoningEffort` to the highest advertised effort — but only when the model's raised default is *not* already the highest, i.e. when the chokepoint above did not reach the call. In the normal case it stays silent and the Harness materializes the adapter default. It runs after step preparation froze the selection and before defaults/validation, so either way the logged header and the provider request carry the level; explicit efforts are preserved. |
 | `llm/adapters-updated` | Tells connected clients to refetch the catalog after the patch, including a delayed repeat for a client that connects while the composition starts. |
 
 Models with no reasoning metadata, or whose only level is `off`, are left
@@ -94,10 +94,11 @@ for a release without that chokepoint.
 so the overrides and their guards use `Symbol.for('cordis.original')` to reach
 the raw service. Writing through the proxy also lands on the raw instance, but
 the explicit target keeps the guard meaningful. On the default path the plugin
-patches only `llm.normalizeModelInfo` and returns; a release that drops it falls
-back to `resolveModelInfoFor` + `prepareCall`, and a release that drops those
-too makes the plugin row fail at activation instead of silently reverting to a
-cosmetic label.
+patches `llm.normalizeModelInfo` and leaves the `prepareCall` guard installed; a
+release that drops `normalizeModelInfo` falls back to `resolveModelInfoFor` for
+the catalog (the call guard keeps covering dispatch), and a release that drops
+those too makes the plugin row fail at activation instead of silently reverting
+to a cosmetic label.
 
 ## Selection timing
 

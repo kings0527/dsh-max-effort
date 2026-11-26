@@ -265,4 +265,50 @@ const deepseek = (provider, model) => ({
   assert.equal(after.config.reasoningEffort, 'high')
 }
 
+// Regression guard: a release that keeps `normalizeModelInfo` but stops
+// routing `prepareCall` through it must still send the highest level. The
+// catalog path is patched, yet the call seam sees the adapter's own default
+// (`high`) and raises the call itself.
+{
+  const disposers = []
+  const adapterInfo = (provider, model) => deepseek(provider, model)
+  const raw = {
+    normalizeModelInfo(_reg, model, resolved) {
+      return { ...resolved, id: model }
+    },
+    async resolveModelInfo(provider, model) {
+      return this.normalizeModelInfo({ provider: { id: provider } }, model, adapterInfo(provider, model))
+    },
+    async prepareCall(config, _signal, configure) {
+      // Deliberately bypasses `normalizeModelInfo`, like a runtime rewiring.
+      const info = adapterInfo(config.provider, config.model)
+      const { provider, model, ...controls } = config
+      const proposed = configure === undefined ? config : { ...configure(controls, info), provider, model }
+      return { config: proposed, adapterDefaults: {} }
+    },
+  }
+  const view = new Proxy(raw, {
+    get(target, prop, receiver) {
+      if (prop === Symbol.for('cordis.original')) return target
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const ctx = {
+    llm: view,
+    logger: { warn() {} },
+    emit() {},
+    effect(cb) {
+      const d = cb()
+      if (typeof d === 'function') disposers.push(d)
+      return d
+    },
+  }
+  apply(ctx, {})
+  const info = await ctx.llm.resolveModelInfo('deepseek-account', 'deepseek-flash')
+  assert.equal(info.reasoning.defaultEffort, 'max', 'catalog still advertises max')
+  const prepared = await ctx.llm.prepareCall({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(prepared.config.reasoningEffort, 'max', 'the call seam covers a rewired prepareCall')
+  for (const d of disposers) d()
+}
+
 console.log('highest-effort: all assertions passed')

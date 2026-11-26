@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-max-effort",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Default every model to its highest advertised reasoning effort at selection time and send it for effort-free calls.",
