@@ -11,10 +11,10 @@
 //    both the public `llm.resolveModelInfo()` (which feeds
 //    `sessionController.modelCatalog()`, the catalog behind the composer model
 //    seat and the `/model` popup) and `llm.resolveCallConfig()` (which
-//    `session.selectModel` uses to normalize and store a Session's selection).
-//    Raising `reasoning.defaultEffort` there makes every model switch carry
-//    the highest effort even when the client sends none — the client's caption
-//    then reads the stored selection, not its cached catalog.
+//    `session.selectModel` validates a selection through).
+//    Raising `reasoning.defaultEffort` there makes the catalog offer the
+//    highest effort as the model default, so a model switch stores it and the
+//    caption reads it instead of “Default”.
 //
 // 2. `llm.prepareCall()` is where the Harness logs the request header and
 //    dispatches the provider call. Its third argument, `ConfigureCall`, is a

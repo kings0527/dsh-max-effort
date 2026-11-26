@@ -70,7 +70,7 @@ pre-patch defaults; announcing the update is what closes that window.
 
 | Seam | Effect |
 |---|---|
-| `llm.resolveModelInfoFor()` | The one resolution point behind both the public model catalog and `resolveCallConfig`, which `session.selectModel` uses to normalize and store a selection. Raising `reasoning.defaultEffort` there makes every model switch store the highest effort **even when the client sends none** — the caption reads the stored selection, so a stale client-side catalog cannot reintroduce “Default”. |
+| `llm.resolveModelInfoFor()` | The one resolution point behind both the public model catalog and `resolveCallConfig`. Raising `reasoning.defaultEffort` there makes the catalog — and every model switch built from it — carry the highest effort, so the caption reads it instead of “Default”. (In DSH 0.2.2, `session.selectModel` validates through `resolveCallConfig` but stores what the client sent; the client sends the catalog default, which is why the catalog fix alone covers a switch but not an old stored selection.) |
 | `llm.prepareCall()` | Passes a `ConfigureCall` that gives a call without an explicit `reasoningEffort` the highest advertised effort. It runs after step preparation fixed the selection and before defaults/validation, so the logged header and the provider request both carry the level. Explicit efforts are preserved. |
 | `llm/adapters-updated` | Tells connected clients to refetch the catalog after the patch, including a delayed repeat for a client that connects while the composition starts. |
 
