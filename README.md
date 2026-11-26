@@ -71,29 +71,39 @@ pre-patch defaults; announcing the update is what closes that window.
 | Seam | Effect |
 |---|---|
 | `llm.resolveModelInfoFor()` | The one resolution point behind both the public model catalog and `resolveCallConfig`, which `session.selectModel` uses to normalize and store a selection. Raising `reasoning.defaultEffort` there makes every model switch store the highest effort **even when the client sends none** — the caption reads the stored selection, so a stale client-side catalog cannot reintroduce “Default”. |
+| `llm.prepareCall()` | Passes a `ConfigureCall` that gives a call without an explicit `reasoningEffort` the highest advertised effort. It runs after step preparation fixed the selection and before defaults/validation, so the logged header and the provider request both carry the level. Explicit efforts are preserved. |
 | `llm/adapters-updated` | Tells connected clients to refetch the catalog after the patch, including a delayed repeat for a client that connects while the composition starts. |
 
 Models with no reasoning metadata, or whose only level is `off`, are left
 unchanged. For a model whose top level is `high` rather than `max`, the highest
 advertised level is what gets selected.
 
+A Session resumed from a log whose stored selection predates this plugin still
+carries no effort, so the catalog label alone would be cosmetic there. The
+`prepareCall` seam is what makes those calls real: DSH 0.2.2 rejects a late
+effort change in `agent/request` (it fails the turn with “use
+agent.model.select() before step preparation”), but `prepareCall`'s
+`ConfigureCall` hook runs inside the frozen call the loop is about to log and
+dispatch.
+
 ## Implementation note
 
 `ctx.llm` is a traceable proxy whose reads wrap every method in a second proxy,
-so the override and its guard use `Symbol.for('cordis.original')` to reach the
-raw service. Writing through the proxy also lands on the raw instance, but the
-explicit target keeps the guard meaningful. If a future DSH release removes
-`llm.resolveModelInfo`, the plugin row fails at activation instead of silently
-reverting to “Default”.
+so the overrides and their guards use `Symbol.for('cordis.original')` to reach
+the raw service. Writing through the proxy also lands on the raw instance, but
+the explicit target keeps the guard meaningful. If a future DSH release removes
+`llm.resolveModelInfoFor` or `llm.prepareCall`, the plugin row fails at
+activation instead of silently reverting to a cosmetic label.
 
 ## Selection timing
 
-Both the model switch and the stored default now reach `agent.model.select()`
-before step preparation, which is the only point DSH accepts a new effort.
+A model switch reaches `agent.model.select()` before step preparation, which is
+the only point DSH accepts a new effort. A call with no stored effort is raised
+inside `prepareCall`, after that point and before the header is logged.
 
 ## Configuration
 
-The catalog switch defaults to `true`; override it in the profile patch when
+Both switches default to `true`; override them in the profile patch when
 needed.
 
 ```yaml
@@ -101,10 +111,12 @@ needed.
   name: '@local/dsh-max-effort'
   config:
     catalogDefault: true
+    callDefault: true
 ```
 
-`catalogDefault: false` keeps the shipped catalog defaults and parks the plugin
-without uninstalling it. The obsolete `requestFallback` key is ignored.
+`catalogDefault: false` keeps the shipped catalog defaults; `callDefault: false`
+stops lifting effort-free calls. Set both to `false` to park the plugin without
+uninstalling it. The obsolete `requestFallback` key is ignored.
 
 ## Test
 

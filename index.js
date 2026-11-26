@@ -1,10 +1,11 @@
 // dsh-max-effort — Host plugin.
 //
-// Goal: switching models in the Web GUI must land on the highest reasoning
-// effort the model advertises, so the user never has to open the effort menu
-// for a second click.
+// Goal: the composer's "Max" is real. Switching models in the Web GUI must land
+// on the highest reasoning effort the model advertises, and a call that names
+// no effort must actually be sent at that level instead of only showing the
+// label.
 //
-// Two seams:
+// Three seams:
 //
 // 1. `llm.resolveModelInfoFor()` is the one internal resolution point behind
 //    both the public `llm.resolveModelInfo()` (which feeds
@@ -15,17 +16,31 @@
 //    the highest effort even when the client sends none — the client's caption
 //    then reads the stored selection, not its cached catalog.
 //
-// 2. `llm/adapters-updated` is announced after the patch so connected clients
+// 2. `llm.prepareCall()` is where the Harness logs the request header and
+//    dispatches the provider call. Its third argument, `ConfigureCall`, is a
+//    pure synchronous hook that picks the concrete controls from captured
+//    model metadata *before* defaults and validation are applied. Passing one
+//    that raises an effort-free call to the highest advertised level makes the
+//    effort real for Sessions that carry no stored selection (Sessions resumed
+//    from before this plugin, subagents, titles) — and the logged header
+//    records it, so the next step re-derives the same value.
+//
+// 3. `llm/adapters-updated` is announced after the patch so connected clients
 //    refetch their cached model catalog; the client caches it per connection
 //    and a page that connected while the composition was still starting would
 //    otherwise keep the pre-patch defaults.
 //
-// Reasoning effort is selected before the step is prepared, by
-// `agent.model.select()` through the normal model-selection path. DSH 0.2.2
-// freezes that selection before dispatching `agent/request`; mutating the
-// request there is rejected at runtime, so this plugin never listens to it.
-// The catalog seam remains safe for effort-free switches, and explicit
-// lower-effort choices are preserved.
+// Why not the `agent/request` waterfall: DSH 0.2.2 rejects a proposed effort
+// that differs from the one step preparation fixed (`agent-loop` agent.ts
+// throws "agent/request proposed reasoning effort …"), which fails the whole
+// turn. `prepareCall`'s configure hook runs after that check, inside the call
+// the loop already froze, so it is the supported seam.
+//
+// The call seam degrades safely: an adapter with no reasoning metadata, or one
+// whose only level is `off`, keeps its current default and the request is left
+// untouched. The resolution and call seams fail loudly when the Host API they
+// wrap is gone, because a silent no-op would look like "Default" all over
+// again.
 
 export const name = 'max-effort'
 export const inject = ['llm']
@@ -80,16 +95,21 @@ function withHighestDefault(info) {
  * @param ctx - owning Host context.
  * @param config - optional switches from `cordis.patch.yml`.
  * @param config.catalogDefault - advertise the highest effort as the model default (default true).
+ * @param config.callDefault - lift effort-free calls to the highest effort inside `prepareCall` (default true).
+ *
+ * The retired `requestFallback` switch is ignored: it used to register the
+ * `agent/request` seam this release's loop rejects.
  */
 export function apply(ctx, config = {}) {
   const options = {
     catalogDefault: config?.catalogDefault !== false,
+    callDefault: config?.callDefault !== false,
   }
   const llm = ctx.llm
+  const target = llm[CORDIS_ORIGINAL] ?? llm
 
   if (options.catalogDefault) {
     // `ctx.llm` is a read-through traceable proxy; write to the raw service.
-    const target = llm[CORDIS_ORIGINAL] ?? llm
     const original = target.resolveModelInfoFor
     if (typeof original !== 'function') {
       throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
@@ -122,6 +142,37 @@ export function apply(ctx, config = {}) {
     for (const timer of timers) timer.unref?.()
     ctx.effect(() => () => {
       for (const timer of timers) clearTimeout(timer)
+    })
+  }
+
+  if (options.callDefault) {
+    // `prepareCall` applies defaults and validates the controls *after* calling
+    // `configure`, so an effort supplied here is indistinguishable from one the
+    // step itself fixed: it is logged in the request header and sent to the
+    // provider. A caller that already named an effort (a stored selection, a
+    // pinned level) keeps it; an effort-free caller gets the highest level the
+    // captured model advertises.
+    const originalPrepareCall = target.prepareCall
+    if (typeof originalPrepareCall !== 'function') {
+      throw new Error('max-effort: llm.prepareCall is unavailable, so effort-free calls cannot be raised')
+    }
+    const patchedPrepareCall = async function prepareCallWithHighestEffort(callConfig, signal, configure) {
+      const raiseEffort = (controls, model) => {
+        const chosen = configure === undefined ? controls : configure(controls, model)
+        if (chosen === null || typeof chosen !== 'object') return chosen
+        if (chosen.reasoningEffort !== undefined) return chosen
+        const highest = highestEffort(model?.reasoning)
+        if (highest === undefined) return chosen
+        return { ...chosen, reasoningEffort: highest }
+      }
+      return originalPrepareCall.call(this, callConfig, signal, raiseEffort)
+    }
+    target.prepareCall = patchedPrepareCall
+    if (target.prepareCall !== patchedPrepareCall) {
+      throw new Error('max-effort: llm.prepareCall did not accept the request override')
+    }
+    ctx.effect(() => () => {
+      if (target.prepareCall === patchedPrepareCall) target.prepareCall = originalPrepareCall
     })
   }
 }

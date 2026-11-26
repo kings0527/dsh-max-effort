@@ -25,12 +25,36 @@ assert.equal(highestEffort({ efforts: [{ id: 'off' }, { id: 'low' }, { id: 'max'
 function fakeCtx(modelInfo) {
   const listeners = new Map()
   const disposers = []
+  // The adapter's own route metadata, which `prepareCall` uses through
+  // `adapter.prepareCall()` — deliberately NOT the patched
+  // `resolveModelInfoFor` the catalog seam wraps.
+  const adapterModelInfo = async (provider, model) => modelInfo(provider, model)
   const raw = {
     async resolveModelInfoFor(provider, model) {
       return modelInfo(provider, model)
     },
     async resolveModelInfo(provider, model) {
       return this.resolveModelInfoFor(provider, model)
+    },
+    async prepareCall(config, _signal, configure) {
+      const info = await adapterModelInfo(config.provider, config.model)
+      const { provider, model, ...controls } = config
+      const chosen = configure === undefined ? controls : configure(controls, info)
+      const reasoning = info?.reasoning
+      const requested = chosen.reasoningEffort
+      let resolvedConfig = { provider, model, ...chosen }
+      if (reasoning === undefined) {
+        if (requested !== undefined) throw new Error(`unsupported reasoning effort ${requested}`)
+      } else {
+        const effective = requested ?? reasoning.defaultEffort
+        if (effective !== undefined) {
+          if (!reasoning.efforts.some((effort) => effort.id === effective)) {
+            throw new Error(`unsupported reasoning effort ${effective}`)
+          }
+          if (requested !== effective) resolvedConfig = { ...resolvedConfig, reasoningEffort: effective }
+        }
+      }
+      return { config: resolvedConfig, adapterDefaults: {} }
     },
     async resolveCallConfig(config) {
       const info = await this.resolveModelInfoFor(config.provider, config.model)
@@ -116,7 +140,8 @@ const deepseek = (provider, model) => ({
 
 // Request safety: DSH freezes the selection before `agent/request`, so the
 // plugin must never register a late effort override — even if an old profile
-// still carries `requestFallback: true`.
+// still carries `requestFallback: true`. The call seam lives inside
+// `prepareCall`, after that guard.
 {
   const { ctx, listeners } = fakeCtx(deepseek)
   apply(ctx, { requestFallback: true })
@@ -127,6 +152,52 @@ const deepseek = (provider, model) => ({
   )
   const stored = await ctx.llm.resolveCallConfig({ provider: 'deepseek-account', model: 'deepseek-flash' })
   assert.equal(stored.reasoningEffort, 'max', 'model selection still lands on max')
+}
+
+// Call seam: a call without a stored effort really goes out at the highest
+// level. This is the case the catalog seam alone cannot reach — Sessions
+// resumed from a log whose selection predates this plugin.
+{
+  const { ctx, disposers } = fakeCtx(deepseek)
+  apply(ctx, {})
+
+  const prepared = await ctx.llm.prepareCall({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(prepared.config.reasoningEffort, 'max', 'the outgoing call carries max')
+
+  const explicit = await ctx.llm.prepareCall({
+    provider: 'deepseek-account',
+    model: 'deepseek-flash',
+    reasoningEffort: 'low',
+  })
+  assert.equal(explicit.config.reasoningEffort, 'low', 'an explicitly named effort is preserved')
+
+  const configured = await ctx.llm.prepareCall(
+    { provider: 'deepseek-account', model: 'deepseek-flash' },
+    undefined,
+    (controls) => ({ ...controls, temperature: 0.2 }),
+  )
+  assert.equal(configured.config.temperature, 0.2, "a caller's own configure still runs")
+  assert.equal(configured.config.reasoningEffort, 'max')
+
+  for (const dispose of disposers) dispose()
+  const restored = await ctx.llm.prepareCall({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(restored.config.reasoningEffort, 'high', 'uninstall restores the adapter default')
+}
+
+// Call seam can be disabled; the adapter default flows through untouched.
+{
+  const { ctx } = fakeCtx(deepseek)
+  apply(ctx, { callDefault: false })
+  const prepared = await ctx.llm.prepareCall({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(prepared.config.reasoningEffort, 'high')
+}
+
+// A model without reasoning metadata keeps its call configuration.
+{
+  const { ctx } = fakeCtx(() => ({ provider: 'acme', id: 'plain', name: 'plain' }))
+  apply(ctx, {})
+  const prepared = await ctx.llm.prepareCall({ provider: 'acme', model: 'plain' })
+  assert.equal(prepared.config.reasoningEffort, undefined)
 }
 
 console.log('highest-effort: all assertions passed')

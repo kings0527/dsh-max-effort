@@ -3,3 +3,4 @@
       name: '@local/dsh-max-effort'
       config:
         catalogDefault: true
+        callDefault: true
