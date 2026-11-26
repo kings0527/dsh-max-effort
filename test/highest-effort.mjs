@@ -200,4 +200,69 @@ const deepseek = (provider, model) => ({
   assert.equal(prepared.config.reasoningEffort, undefined)
 }
 
+// DSH 0.2.2 normalizeModelInfo seam: when both catalogDefault and callDefault
+// are enabled, raising defaultEffort in `normalizeModelInfo` makes `prepareCall`
+// materialize `max` while keeping `adapterDefaults.reasoningEffort === true`
+// (so `dsh-agent` does not mistake a defaulted level for an explicit user pin)
+// and exposing `model.reasoning.defaultEffort === 'max'` to `configure`.
+{
+  const disposers = []
+  const raw = {
+    normalizeModelInfo(_reg, model, resolved) {
+      return { ...resolved, id: model }
+    },
+    async resolveModelInfo(provider, model) {
+      return this.normalizeModelInfo({ provider: { id: provider } }, model, deepseek(provider, model))
+    },
+    async prepareCall(config, _signal, configure) {
+      const info = this.normalizeModelInfo(
+        { provider: { id: config.provider } },
+        config.model,
+        deepseek(config.provider, config.model),
+      )
+      const { provider, model, ...controls } = config
+      const proposed = configure === undefined ? config : { ...configure(controls, info), provider, model }
+      const effective = proposed.reasoningEffort ?? info.reasoning?.defaultEffort
+      const resolvedConfig = effective === undefined ? proposed : { ...proposed, reasoningEffort: effective }
+      const adapterDefaults =
+        proposed.reasoningEffort === undefined && resolvedConfig.reasoningEffort !== undefined
+          ? { reasoningEffort: true }
+          : {}
+      return { config: resolvedConfig, adapterDefaults }
+    },
+  }
+  const view = new Proxy(raw, {
+    get(target, prop, receiver) {
+      if (prop === Symbol.for('cordis.original')) return target
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const ctx = {
+    llm: view,
+    logger: { warn() {} },
+    emit() {},
+    effect(cb) {
+      const d = cb()
+      if (typeof d === 'function') disposers.push(d)
+      return d
+    },
+  }
+  apply(ctx, {})
+  let seenDefault
+  const prepared = await ctx.llm.prepareCall(
+    { provider: 'deepseek-account', model: 'deepseek-flash' },
+    undefined,
+    (controls, model) => {
+      seenDefault = model.reasoning?.defaultEffort
+      return controls
+    },
+  )
+  assert.equal(seenDefault, 'max', 'configure sees the raised defaultEffort')
+  assert.equal(prepared.config.reasoningEffort, 'max')
+  assert.equal(prepared.adapterDefaults.reasoningEffort, true, 'defaulted effort preserves adapterDefaults provenance')
+  for (const d of disposers) d()
+  const after = await ctx.llm.prepareCall({ provider: 'deepseek-account', model: 'deepseek-flash' })
+  assert.equal(after.config.reasoningEffort, 'high')
+}
+
 console.log('highest-effort: all assertions passed')

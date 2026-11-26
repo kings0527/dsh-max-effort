@@ -108,23 +108,7 @@ export function apply(ctx, config = {}) {
   const llm = ctx.llm
   const target = llm[CORDIS_ORIGINAL] ?? llm
 
-  if (options.catalogDefault) {
-    // `ctx.llm` is a read-through traceable proxy; write to the raw service.
-    const original = target.resolveModelInfoFor
-    if (typeof original !== 'function') {
-      throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
-    }
-    const patched = async function resolveModelInfoForWithHighestDefault(...args) {
-      return withHighestDefault(await original.apply(this, args))
-    }
-    target.resolveModelInfoFor = patched
-    if (target.resolveModelInfoFor !== patched) {
-      throw new Error('max-effort: llm.resolveModelInfoFor did not accept the catalog override')
-    }
-    ctx.effect(() => () => {
-      if (target.resolveModelInfoFor === patched) target.resolveModelInfoFor = original
-    })
-
+  const announceCatalog = () => {
     // The client fetches its model catalog once per connection and refreshes it
     // only on a registry/settings/credential notification. A page that connected
     // while the composition was still starting holds the pre-patch defaults
@@ -143,6 +127,49 @@ export function apply(ctx, config = {}) {
     ctx.effect(() => () => {
       for (const timer of timers) clearTimeout(timer)
     })
+  }
+
+  // Fast & faithful path for DSH 0.2.2 when both seams are enabled (default):
+  // `llm.normalizeModelInfo` is the single shared normalization chokepoint
+  // called by both `resolveModelInfoFor` (catalog + `resolveCallConfig`) and
+  // `prepareCall`. Raising `defaultEffort` there keeps `proposed.reasoningEffort`
+  // undefined on effort-free calls, so `prepareCall` records
+  // `adapterDefaults: { reasoningEffort: true }` (preserving default-vs-pinned
+  // provenance in `dsh-agent`'s `selectionOfHeader`) and hands callers'
+  // `configure(controls, model)` callbacks consistent `model.reasoning.defaultEffort`.
+  if (options.catalogDefault && options.callDefault && typeof target.normalizeModelInfo === 'function') {
+    const originalNormalize = target.normalizeModelInfo
+    const patchedNormalize = function normalizeModelInfoWithHighestDefault(...args) {
+      return withHighestDefault(originalNormalize.apply(this, args))
+    }
+    target.normalizeModelInfo = patchedNormalize
+    if (target.normalizeModelInfo !== patchedNormalize) {
+      throw new Error('max-effort: llm.normalizeModelInfo did not accept the default-effort override')
+    }
+    ctx.effect(() => () => {
+      if (target.normalizeModelInfo === patchedNormalize) target.normalizeModelInfo = originalNormalize
+    })
+    announceCatalog()
+    return
+  }
+
+  if (options.catalogDefault) {
+    // `ctx.llm` is a read-through traceable proxy; write to the raw service.
+    const original = target.resolveModelInfoFor
+    if (typeof original !== 'function') {
+      throw new Error('max-effort: llm.resolveModelInfoFor is unavailable, so model-switch defaults cannot be raised')
+    }
+    const patched = async function resolveModelInfoForWithHighestDefault(...args) {
+      return withHighestDefault(await original.apply(this, args))
+    }
+    target.resolveModelInfoFor = patched
+    if (target.resolveModelInfoFor !== patched) {
+      throw new Error('max-effort: llm.resolveModelInfoFor did not accept the catalog override')
+    }
+    ctx.effect(() => () => {
+      if (target.resolveModelInfoFor === patched) target.resolveModelInfoFor = original
+    })
+    announceCatalog()
   }
 
   if (options.callDefault) {
